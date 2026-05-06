@@ -7,13 +7,12 @@
 //
 // No labeling UI here on purpose — workers do the labeling, the admin pulls.
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import {
   listProjects,
   listSessions,
   exportYolo,
   exportAll,
-  importSessionData,
 } from "../lib/labelApi";
 
 export default function AdminApp() {
@@ -29,10 +28,6 @@ export default function AdminApp() {
   const [aggStats, setAggStats] = useState(null);
   const [aggError, setAggError] = useState(null);
 
-  // Import worker data files
-  const importInputRef             = useRef(null);
-  const [importing,   setImporting]   = useState(false);
-  const [importLog,   setImportLog]   = useState([]); // [{ name, ok, msg }]
 
   useEffect(() => {
     let cancelled = false;
@@ -78,24 +73,6 @@ export default function AdminApp() {
     }
   };
 
-  const handleImport = async (files) => {
-    if (!files?.length) return;
-    setImporting(true);
-    const log = [];
-    for (const file of Array.from(files)) {
-      try {
-        const text = await file.text();
-        const sess = await importSessionData(text);
-        log.push({ name: file.name, ok: true, msg: `Imported "${sess.filename}"` });
-      } catch (e) {
-        log.push({ name: file.name, ok: false, msg: e.message });
-      }
-    }
-    setImportLog(log);
-    setImporting(false);
-    setRefreshTick((n) => n + 1); // reload the session list
-  };
-
   const buildAggregate = async () => {
     setAggState("loading"); setAggError(null);
     try {
@@ -122,39 +99,6 @@ export default function AdminApp() {
       </div>
 
       <div style={s.content}>
-        {/* Import worker data files */}
-        <div style={s.importCard}>
-          <div style={s.aggTitle}>Import worker data</div>
-          <div style={s.aggSub}>
-            Workers send you a <b>_labeled.json</b> file when they click "Send to admin".
-            Import those files here — they'll appear in the session list below.
-          </div>
-          <input
-            ref={importInputRef}
-            type="file"
-            accept=".json"
-            multiple
-            style={{ display: "none" }}
-            onChange={(e) => handleImport(e.target.files)}
-          />
-          <button
-            style={{ ...s.aggBtn, background: "#0ea5e9", opacity: importing ? 0.5 : 1 }}
-            onClick={() => importInputRef.current?.click()}
-            disabled={importing}
-          >
-            {importing ? "Importing…" : "Import _labeled.json files"}
-          </button>
-          {importLog.length > 0 && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-              {importLog.map((entry, i) => (
-                <div key={i} style={{ fontSize: 12, color: entry.ok ? "#4ade80" : "#f87171" }}>
-                  {entry.ok ? "✓" : "✗"} {entry.msg}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
         {/* Aggregate export block — pinned at top of content */}
         <div style={s.aggCard}>
           <div style={s.aggTitle}>Training dataset (aggregate)</div>
@@ -274,11 +218,6 @@ const s = {
     margin: "0 auto",
   },
 
-  importCard: {
-    background: "#1a1a2e", border: "1px solid #0ea5e9", borderRadius: 8,
-    padding: "14px 18px",
-    display: "flex", flexDirection: "column", gap: 8,
-  },
   aggCard: {
     background: "#1a1a2e", border: "1px solid #2a2a4a", borderRadius: 8,
     padding: "14px 18px",
