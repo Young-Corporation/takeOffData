@@ -104,7 +104,11 @@ export function getPageSvgUrl(sessionId, pageNumber) {
   return `idb://${sessionId}/${pageNumber}`;
 }
 
-// SVG rendering via pdfjs-dist v3 SVGGraphics — vector output, infinitely sharp at any zoom.
+// SVG rendering via pdfjs-dist v3 SVGGraphics — vector output, sharp at any zoom.
+// XMLSerializer emits namespace-prefixed tags (<svg:svg>, <svg:g>, …) because
+// pdfjs creates elements via createElementNS(SVG_NS, "svg:tag"). The HTML parser
+// used by dangerouslySetInnerHTML does not recognise those prefixed names, so
+// nothing renders. We strip the prefix and move the namespace to the default.
 export async function renderPage(sessionId, pageNumber) {
   const pdf      = await _getPdf(sessionId);
   const page     = await pdf.getPage(pageNumber);
@@ -115,11 +119,12 @@ export async function renderPage(sessionId, pageNumber) {
   const svgEl    = await svgGfx.getSVG(opList, viewport);
   const w        = Math.round(viewport.width);
   const h        = Math.round(viewport.height);
-  svgEl.setAttribute('width', w);
-  svgEl.setAttribute('height', h);
-  svgEl.style.display = 'block';
-  const svgStr   = new XMLSerializer().serializeToString(svgEl);
-  return { html: svgStr, w, h };
+  svgEl.setAttribute('width',  String(w));
+  svgEl.setAttribute('height', String(h));
+  const html = new XMLSerializer().serializeToString(svgEl)
+    .replace(/xmlns:svg="[^"]*"/, 'xmlns="http://www.w3.org/2000/svg"')
+    .replace(/<(\/?)svg:/g, '<$1');
+  return { html, w, h };
 }
 
 // ── Marks ─────────────────────────────────────────────────────────────────────
