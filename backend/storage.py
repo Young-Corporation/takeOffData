@@ -97,6 +97,22 @@ def upload_page_png(session_id: str, page_number: int, png_bytes: bytes) -> str:
     return key
 
 
+def upload_page_svg(session_id: str, page_number: int, svg: str) -> str:
+    key = f"label-sessions/{session_id}/pages/{page_number}.svg"
+    _s3().put_object(
+        Bucket=settings.aws_s3_bucket,
+        Key=key,
+        Body=svg.encode("utf-8"),
+        ContentType="image/svg+xml",
+    )
+    return key
+
+
+def download_text(s3_key: str) -> str:
+    obj = _s3().get_object(Bucket=settings.aws_s3_bucket, Key=s3_key)
+    return obj["Body"].read().decode("utf-8")
+
+
 def page_png_exists(session_id: str, page_number: int) -> bool:
     key = f"label-sessions/{session_id}/pages/{page_number}.png"
     try:

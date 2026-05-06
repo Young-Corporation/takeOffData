@@ -181,7 +181,7 @@ export default function MarkManager({
 
         <input
           style={styles.input}
-          placeholder="Name (e.g. Smoke Detector)"
+          placeholder="Name (e.g. S1)"
           value={name}
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && handleCreate()}

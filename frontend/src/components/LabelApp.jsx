@@ -16,6 +16,7 @@ import {
   getCounts,
   listPageExclusions,   createPageExclusion,   deletePageExclusion,
   listRegionExclusions, createRegionExclusion, deleteRegionExclusion,
+  exportSessionData,
 } from "../lib/labelApi";
 
 const SVG_RENDER_SCALE = 4; // roughly matches the prior 300-DPI canvas overlay
@@ -468,6 +469,25 @@ export default function LabelApp() {
         >
           {session?.done ? "✓ Done" : "Mark as done"}
         </button>
+        {session?.done && (
+          <button
+            style={s.dataBtn}
+            title="Download a data file to send to the admin for the final YOLO export"
+            onClick={async () => {
+              try {
+                const url = await exportSessionData(session.id);
+                const a = Object.assign(document.createElement("a"), {
+                  href: url,
+                  download: `${session.filename.replace(/\.pdf$/i, "")}_labeled.json`,
+                });
+                a.click();
+                setTimeout(() => URL.revokeObjectURL(url), 60_000);
+              } catch (e) { alert("Export failed: " + e.message); }
+            }}
+          >
+            ⬇ Send to admin
+          </button>
+        )}
         <span style={s.modeHint}>
           {excludeMode
             ? "Exclude mode · Drag to add a zone · Click a zone to remove"
@@ -760,6 +780,7 @@ const s = {
   navBtn:     { background: "none", border: "1px solid #333", borderRadius: 3, color: "#888", cursor: "pointer", padding: "3px 8px", fontSize: 13 },
   doneBtn:        { background: "none", border: "1px solid #333", borderRadius: 3, color: "#888", cursor: "pointer", padding: "3px 10px", fontSize: 12 },
   doneBtnActive:  { background: "#22c55e", border: "1px solid #22c55e", borderRadius: 3, color: "#fff", cursor: "pointer", padding: "3px 10px", fontSize: 12, fontWeight: 600 },
+  dataBtn:        { background: "#0ea5e9", border: "none", borderRadius: 3, color: "#fff", cursor: "pointer", padding: "3px 10px", fontSize: 12, fontWeight: 600 },
   excludeBtn:        { background: "none", border: "1px solid #333", borderRadius: 3, color: "#888", cursor: "pointer", padding: "3px 10px", fontSize: 12 },
   excludeBtnActive:  { background: "#ef4444", border: "1px solid #ef4444", borderRadius: 3, color: "#fff", cursor: "pointer", padding: "3px 10px", fontSize: 12, fontWeight: 600 },
   skipPageBtn:       { background: "none", border: "1px solid #333", borderRadius: 3, color: "#888", cursor: "pointer", padding: "3px 10px", fontSize: 12 },

@@ -7,20 +7,49 @@ from __future__ import annotations
 import logging
 
 import fitz
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from database import get_db
+from database import SessionLocal, get_db
 from models import Project, LabelSession, Mark, Annotation, PageExclusion, RegionExclusion
-from storage import upload_pdf, download_pdf, delete_session_files
+from storage import upload_pdf, download_pdf, upload_page_svg, download_text, delete_session_files
 from ws import manager
 from yolo_export import build_export, build_aggregate_export
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def warm_session_svg_cache(session_id: str, pdf_bytes: bytes, page_count: int) -> None:
+    """Render all pages to SVG after upload so navigation does not block on it."""
+    db = SessionLocal()
+    try:
+        session = db.get(LabelSession, session_id)
+        if not session:
+            return
+
+        page_keys = session.page_s3_keys or []
+        if len(page_keys) < page_count:
+            page_keys = [*page_keys, *([None] * (page_count - len(page_keys)))]
+
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        try:
+            for idx in range(page_count):
+                if page_keys[idx]:
+                    continue
+                svg = doc[idx].get_svg_image()
+                page_keys[idx] = upload_page_svg(session_id, idx + 1, svg)
+                session.page_s3_keys = [*page_keys]
+                db.commit()
+        finally:
+            doc.close()
+    except Exception:
+        logger.warning("failed to warm SVG cache for session %s", session_id, exc_info=True)
+    finally:
+        db.close()
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -129,6 +158,7 @@ def delete_project(project_id: str, db: Session = Depends(get_db)):
 @router.post("/projects/{project_id}/sessions", response_model=SessionOut)
 async def create_session(
     project_id: str,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db:   Session    = Depends(get_db),
 ):
@@ -154,6 +184,7 @@ async def create_session(
 
     session.s3_key = upload_pdf(session.id, data, file.filename)
     db.commit(); db.refresh(session)
+    background_tasks.add_task(warm_session_svg_cache, session.id, data, page_count)
     return session
 
 
@@ -200,11 +231,12 @@ def delete_session(session_id: str, db: Session = Depends(get_db)):
 
 # ── Page rendering — served directly, no presigned URL ───────────────────────
 
-@router.get("/sessions/{session_id}/pages/{page_number}/image")
-def get_page_image(session_id: str, page_number: int, db: Session = Depends(get_db)):
+@router.get("/sessions/{session_id}/pages/{page_number}/svg")
+def get_page_svg(session_id: str, page_number: int, db: Session = Depends(get_db)):
     """
-    Renders the PDF page to PNG and streams bytes directly back.
-    Bypasses S3 presigned URLs to avoid CORS and expiry issues.
+    Streams the PDF page back as a vector SVG. The frontend injects it inline
+    so the browser re-rasterizes the parametric paths at every zoom level —
+    no DPI ceiling, no blur on zoom-in.
     """
     s = db.get(LabelSession, session_id)
     if not s:
@@ -212,15 +244,29 @@ def get_page_image(session_id: str, page_number: int, db: Session = Depends(get_
     if page_number < 1 or page_number > s.page_count:
         raise HTTPException(400, "Page out of range")
 
+    page_keys = s.page_s3_keys or []
+    cached_key = page_keys[page_number - 1] if page_number <= len(page_keys) else None
+    if cached_key:
+        try:
+            svg = download_text(cached_key)
+            return Response(content=svg, media_type="image/svg+xml")
+        except Exception:
+            logger.warning("failed to read cached svg %s; re-rendering", cached_key, exc_info=True)
+
     pdf  = download_pdf(s.s3_key)
     doc  = fitz.open(stream=pdf, filetype="pdf")
     page = doc[page_number - 1]
-    mat  = fitz.Matrix(300 / 72, 300 / 72)
-    pix  = page.get_pixmap(matrix=mat)
-    png  = pix.tobytes("png")
+    svg  = page.get_svg_image()
     doc.close()
 
-    return Response(content=png, media_type="image/png")
+    key = upload_page_svg(session_id, page_number, svg)
+    if len(page_keys) < s.page_count:
+        page_keys = [*page_keys, *([None] * (s.page_count - len(page_keys)))]
+    page_keys[page_number - 1] = key
+    s.page_s3_keys = [*page_keys]
+    db.commit()
+
+    return Response(content=svg, media_type="image/svg+xml")
 
 
 # ── Marks ─────────────────────────────────────────────────────────────────────

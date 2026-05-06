@@ -115,17 +115,18 @@ export function getPageSvgUrl(sessionId, pageNumber) {
   return `idb://${sessionId}/${pageNumber}`;
 }
 
-// Renders a PDF page to a JPEG data URL at 2× scale. Returns { html, w, h }
-// matching the shape parseSvgPage() returned, so ZoomPanViewer works unchanged.
+// Renders a PDF page at 6× scale (≈ 432 DPI). The high pixel density means the
+// canvas stays sharp across the full zoom range of ZoomPanViewer (up to 20× from
+// fit), which is visually equivalent to SVG rendering for labeling purposes.
 export async function renderPage(sessionId, pageNumber) {
   const pdf      = await _getPdf(sessionId);
   const page     = await pdf.getPage(pageNumber);
-  const viewport = page.getViewport({ scale: 2 });
+  const viewport = page.getViewport({ scale: 6 });
   const canvas   = document.createElement('canvas');
   canvas.width   = Math.round(viewport.width);
   canvas.height  = Math.round(viewport.height);
   await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-  const dataUrl  = canvas.toDataURL('image/jpeg', 0.92);
+  const dataUrl  = canvas.toDataURL('image/jpeg', 0.93);
   return {
     html: `<img src="${dataUrl}" width="${canvas.width}" height="${canvas.height}" style="display:block">`,
     w: canvas.width,
@@ -447,4 +448,70 @@ export async function exportAll() {
     annotations: allAnnotations.length,
     classes:     uniqueShapes.length,
   };
+}
+
+// ── Session data share (worker → admin) ───────────────────────────────────────
+// Workers export a .json package when they mark a session done. The admin
+// imports those files into their own browser so exportAll() can aggregate them.
+
+export async function exportSessionData(sessionId) {
+  const [session, marks, annotations, pageExcls, regionExcls] = await Promise.all([
+    txGet('sessions', sessionId),
+    txGetAllByIndex('marks',             'session_id', sessionId),
+    txGetAllByIndex('annotations',       'session_id', sessionId),
+    txGetAllByIndex('page_exclusions',   'session_id', sessionId),
+    txGetAllByIndex('region_exclusions', 'session_id', sessionId),
+  ]);
+  if (!session) throw new Error('Session not found');
+
+  // Encode PDF bytes as base64 so the JSON is self-contained.
+  const pdfBase64 = btoa(
+    new Uint8Array(session.pdf_bytes).reduce((s, b) => s + String.fromCharCode(b), '')
+  );
+
+  const pkg = JSON.stringify({
+    _v:              1,
+    session:         _sessionOut(session),
+    marks,
+    annotations,
+    page_exclusions:   pageExcls,
+    region_exclusions: regionExcls,
+    pdf_base64:      pdfBase64,
+  });
+
+  const blob = new Blob([pkg], { type: 'application/json' });
+  return URL.createObjectURL(blob);
+}
+
+export async function importSessionData(jsonText) {
+  const pkg = JSON.parse(jsonText);
+  if (pkg._v !== 1) throw new Error('Unknown data file version');
+
+  const { session, marks, annotations, page_exclusions, region_exclusions, pdf_base64 } = pkg;
+
+  // Decode base64 PDF back to ArrayBuffer.
+  const raw      = atob(pdf_base64);
+  const pdfBytes = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) pdfBytes[i] = raw.charCodeAt(i);
+
+  // Overwrite any existing records with the same IDs (idempotent re-import).
+  await txPut('sessions', { ...session, done: true, pdf_bytes: pdfBytes.buffer });
+  await Promise.all([
+    ...marks.map(r           => txPut('marks',             r)),
+    ...annotations.map(r     => txPut('annotations',       r)),
+    ...page_exclusions.map(r => txPut('page_exclusions',   r)),
+    ...region_exclusions.map(r => txPut('region_exclusions', r)),
+  ]);
+
+  // Ensure the project exists (creates a placeholder if the admin never made it).
+  const proj = await txGet('projects', session.project_id);
+  if (!proj) {
+    await txPut('projects', {
+      id:         session.project_id,
+      name:       `Imported — ${session.filename}`,
+      created_at: session.created_at,
+    });
+  }
+
+  return _sessionOut({ ...session, done: true });
 }
