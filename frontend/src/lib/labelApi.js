@@ -2,7 +2,7 @@
 // data in real time. PDFs live in Supabase Storage; annotations in Postgres.
 
 import * as pdfjsLib from 'pdfjs-dist';
-import pdfjsWorker   from 'pdfjs-dist/build/pdf.worker.min.js?url';
+import pdfjsWorker   from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import JSZip         from 'jszip';
 import { supabase }  from './supabase.js';
 
@@ -104,27 +104,21 @@ export function getPageSvgUrl(sessionId, pageNumber) {
   return `idb://${sessionId}/${pageNumber}`;
 }
 
-// SVG rendering via pdfjs-dist v3 SVGGraphics — vector output, sharp at any zoom.
-// XMLSerializer emits namespace-prefixed tags (<svg:svg>, <svg:g>, …) because
-// pdfjs creates elements via createElementNS(SVG_NS, "svg:tag"). The HTML parser
-// used by dangerouslySetInnerHTML does not recognise those prefixed names, so
-// nothing renders. We strip the prefix and move the namespace to the default.
+// Canvas rendering at 6× scale (432 DPI). PNG avoids JPEG compression blur.
 export async function renderPage(sessionId, pageNumber) {
   const pdf      = await _getPdf(sessionId);
   const page     = await pdf.getPage(pageNumber);
-  const viewport = page.getViewport({ scale: 1.5 });
-  const opList   = await page.getOperatorList();
-  const svgGfx   = new pdfjsLib.SVGGraphics(page.commonObjs, page.objs);
-  svgGfx.embedFonts = true;
-  const svgEl    = await svgGfx.getSVG(opList, viewport);
-  const w        = Math.round(viewport.width);
-  const h        = Math.round(viewport.height);
-  svgEl.setAttribute('width',  String(w));
-  svgEl.setAttribute('height', String(h));
-  const html = new XMLSerializer().serializeToString(svgEl)
-    .replace(/xmlns:svg="[^"]*"/, 'xmlns="http://www.w3.org/2000/svg"')
-    .replace(/<(\/?)svg:/g, '<$1');
-  return { html, w, h };
+  const viewport = page.getViewport({ scale: 6 });
+  const canvas   = document.createElement('canvas');
+  canvas.width   = Math.round(viewport.width);
+  canvas.height  = Math.round(viewport.height);
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+  const dataUrl  = canvas.toDataURL('image/png');
+  return {
+    html: `<img src="${dataUrl}" width="${canvas.width}" height="${canvas.height}" style="display:block">`,
+    w: canvas.width,
+    h: canvas.height,
+  };
 }
 
 // ── Marks ─────────────────────────────────────────────────────────────────────
