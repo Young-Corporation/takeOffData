@@ -3,13 +3,11 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
+  // Set VITE_BASE_PATH to /repo-name/ when deploying to GitHub Pages
+  base: process.env.VITE_BASE_PATH || "/",
   server: {
-    host: true,        // bind to 0.0.0.0 so the dev server is reachable on the LAN
+    host: true,
     port: 5173,
-    strictPort: true,  // fail loudly if 5173 is already taken
-    proxy: {
-      "/api":  "http://localhost:8000",
-      "/ws":   { target: "ws://localhost:8000", ws: true },
-    },
+    strictPort: true,
   },
 });

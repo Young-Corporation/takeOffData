@@ -10,13 +10,78 @@ import { useCollabWS } from "../lib/useCollabWS";
 import {
   createProject, listProjects, deleteProject,
   createSession, listSessions, updateSession,
-  getPageImageUrl,
+  getPageSvgUrl, renderPage,
   listMarks,
   listAnnotations, createAnnotation, deleteAnnotation,
   getCounts,
   listPageExclusions,   createPageExclusion,   deletePageExclusion,
   listRegionExclusions, createRegionExclusion, deleteRegionExclusion,
 } from "../lib/labelApi";
+
+const SVG_RENDER_SCALE = 4; // roughly matches the prior 300-DPI canvas overlay
+const SVG_PAGE_CACHE_LIMIT = 16;
+const svgPageCache = new Map();
+const svgPageRequests = new Map();
+
+function rememberSvgPage(src, page) {
+  if (svgPageCache.has(src)) svgPageCache.delete(src);
+  svgPageCache.set(src, page);
+  while (svgPageCache.size > SVG_PAGE_CACHE_LIMIT) {
+    svgPageCache.delete(svgPageCache.keys().next().value);
+  }
+}
+
+function parseSvgPage(text) {
+  const parsed = new DOMParser().parseFromString(text, "image/svg+xml");
+  const svgEl = parsed.documentElement;
+  let vw = 0, vh = 0;
+  const vb = svgEl.getAttribute("viewBox");
+  if (vb) {
+    const parts = vb.trim().split(/[\s,]+/).map(Number);
+    if (parts.length === 4) { vw = parts[2]; vh = parts[3]; }
+  }
+  if (!vw || !vh) {
+    vw = parseFloat(svgEl.getAttribute("width"))  || 612;
+    vh = parseFloat(svgEl.getAttribute("height")) || 792;
+  }
+  const w = Math.round(vw * SVG_RENDER_SCALE);
+  const h = Math.round(vh * SVG_RENDER_SCALE);
+  svgEl.setAttribute("width",  String(w));
+  svgEl.setAttribute("height", String(h));
+  svgEl.style.backgroundColor = "#fff";
+  return { html: new XMLSerializer().serializeToString(svgEl), w, h };
+}
+
+async function loadSvgPage(src) {
+  const cached = svgPageCache.get(src);
+  if (cached) return cached;
+  if (!svgPageRequests.has(src)) {
+    let request;
+    if (src.startsWith("idb://")) {
+      const rest      = src.slice(6);
+      const sep       = rest.indexOf("/");
+      const sessionId = rest.slice(0, sep);
+      const pageNum   = parseInt(rest.slice(sep + 1), 10);
+      request = renderPage(sessionId, pageNum)
+        .then((page) => { rememberSvgPage(src, page); svgPageRequests.delete(src); return page; })
+        .catch((e)   => { svgPageRequests.delete(src); throw e; });
+    } else {
+      request = fetch(src)
+        .then((r) => {
+          if (!r.ok) throw new Error(`SVG ${r.status}`);
+          return r.text();
+        })
+        .then(parseSvgPage)
+        .then((page) => {
+          rememberSvgPage(src, page);
+          return page;
+        })
+        .finally(() => svgPageRequests.delete(src));
+    }
+    svgPageRequests.set(src, request);
+  }
+  return svgPageRequests.get(src);
+}
 
 export default function LabelApp() {
   const [view,        setView]        = useState("projects"); // projects | sessions | label
@@ -74,6 +139,17 @@ export default function LabelApp() {
     setAnnotations([]);
     listAnnotations(session.id, currentPage).then(setAnnotations).catch(console.error);
   }, [session?.id, currentPage]);
+
+  // Keep the current and nearby SVG pages warm in browser memory. The backend
+  // also caches rendered SVGs, but this removes another network/parse roundtrip.
+  useEffect(() => {
+    if (!session) return;
+    const pages = [currentPage, currentPage + 1, currentPage - 1, currentPage + 2]
+      .filter((page) => page >= 1 && page <= session.page_count);
+    pages.forEach((page) => {
+      loadSvgPage(getPageSvgUrl(session.id, page)).catch(console.error);
+    });
+  }, [session?.id, session?.page_count, currentPage]);
 
   const refreshCounts = useCallback(() => {
     if (!session) return;
@@ -327,10 +403,8 @@ export default function LabelApp() {
                     onClick={(e) => {
                       e.stopPropagation();
                       if (confirm(`Delete "${sess.filename}"?`)) {
-                        import("../lib/labelApi").then(({ deleteSession }) => {
-                          deleteSession(sess.id);
-                          setSessions((prev) => prev.filter((x) => x.id !== sess.id));
-                        });
+                        deleteSession(sess.id);
+                        setSessions((prev) => prev.filter((x) => x.id !== sess.id));
                       }
                     }}>×</button>
                 </div>
@@ -343,7 +417,7 @@ export default function LabelApp() {
   }
 
   // ── Label screen ───────────────────────────────────────────────────────────
-  const pageUrl = session ? getPageImageUrl(session.id, currentPage) : null;
+  const pageUrl = session ? getPageSvgUrl(session.id, currentPage) : null;
 
   return (
     <div style={s.root}>
@@ -434,7 +508,7 @@ export default function LabelApp() {
           {pageUrl && (
             <ZoomPanViewer
               key={pageUrl}
-              imgSrc={pageUrl}
+              svgSrc={pageUrl}
               annotations={annotations}
               marks={marks}
               activeMark={activeMark}
@@ -461,18 +535,22 @@ export default function LabelApp() {
   );
 }
 
-// ── ZoomPanViewer — renders image + label canvas inside a zoom/pan stage ──────
+// ── ZoomPanViewer — renders SVG page + label canvas inside a zoom/pan stage ──
 //
-// Image and canvas always render at natural pixel dimensions (so they stay
-// aligned). The wrapper applies a CSS transform for zoom + pan:
+// Page is fetched as SVG markup and injected as live SVG nodes (not <img>),
+// so the browser re-rasterizes the parametric paths at the effective scale
+// every paint — no DPI ceiling, no resampling, no zoom blur. The label canvas
+// matches the SVG's nominal pixel dimensions so the two stay aligned, and the
+// wrapper applies a CSS transform for zoom + pan:
 //   • scroll wheel → zoom around cursor
 //   • middle-click drag → pan
 //   • auto-fits to container on first load and on page change
-function ZoomPanViewer({ imgSrc, annotations, marks, activeMark,
+function ZoomPanViewer({ svgSrc, annotations, marks, activeMark,
   regionExclusions, excludeMode,
   onAnnotationCreate, onAnnotationDelete,
   onExclusionCreate,  onExclusionDelete }) {
-  const [dims, setDims] = useState({ w: 0, h: 0 });
+  const [dims,    setDims]    = useState({ w: 0, h: 0 });
+  const [svgHtml, setSvgHtml] = useState("");
   const [zoom, setZoom] = useState(1);
   const [pan,  setPan]  = useState({ x: 0, y: 0 });
   const containerRef    = useRef(null);
@@ -480,11 +558,24 @@ function ZoomPanViewer({ imgSrc, annotations, marks, activeMark,
   const [isPanning, setIsPanning] = useState(false);
   stateRef.current = { zoom, pan };
 
+  // Fetch the page SVG, parse its viewBox to learn the page's parametric size,
+  // and force concrete unitless width/height attributes so it lays out at
+  // pixel dims we control. We pick 4× the viewBox so the canvas overlay keeps
+  // ~the same bitmap resolution as the prior 300-DPI PNG (the SVG itself is
+  // resolution-independent — its nominal size only affects layout, not
+  // sharpness).
   useEffect(() => {
-    const img = new Image();
-    img.onload = () => setDims({ w: img.naturalWidth, h: img.naturalHeight });
-    img.src = imgSrc;
-  }, [imgSrc]);
+    if (!svgSrc) return;
+    let cancelled = false;
+    loadSvgPage(svgSrc)
+      .then((page) => {
+        if (cancelled) return;
+        setDims({ w: page.w, h: page.h });
+        setSvgHtml(page.html);
+      })
+      .catch(console.error);
+    return () => { cancelled = true; };
+  }, [svgSrc]);
 
   // Fit-to-container once image dims are known
   useEffect(() => {
@@ -575,14 +666,17 @@ function ZoomPanViewer({ imgSrc, annotations, marks, activeMark,
         width: dims.w, height: dims.h,
         transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
         transformOrigin: "0 0",
+        background: "#fff",
       }}>
-        <img
-          src={imgSrc}
-          width={dims.w}
-          height={dims.h}
-          draggable={false}
-          alt=""
-          style={{ display: "block", userSelect: "none", pointerEvents: "none" }}
+        <div
+          dangerouslySetInnerHTML={{ __html: svgHtml }}
+          style={{
+            width: dims.w,
+            height: dims.h,
+            display: "block",
+            userSelect: "none",
+            pointerEvents: "none",
+          }}
         />
         <LabelMode
           width={dims.w}

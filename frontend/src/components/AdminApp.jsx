@@ -62,8 +62,9 @@ export default function AdminApp() {
     setBusySession(sessionId);
     try {
       const { download_url } = await exportYolo(sessionId);
-      // Direct navigation triggers the browser download flow
-      window.location.assign(download_url);
+      const a = Object.assign(document.createElement("a"), { href: download_url, download: "export.zip" });
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(download_url), 60_000);
     } catch (e) {
       alert("Download failed: " + e.message);
     } finally {
