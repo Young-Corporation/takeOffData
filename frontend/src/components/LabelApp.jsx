@@ -102,12 +102,7 @@ export default function LabelApp() {
   const [excludeMode,      setExcludeMode]      = useState(false);
   const [newProjName, setNewProjName] = useState("");
   const [uploading,   setUploading]   = useState(false);
-  const [user,        setUser]        = useState(
-    () => localStorage.getItem("takeoff_label_user") || ""
-  );
-  const [userPrompt, setUserPrompt] = useState(
-    !localStorage.getItem("takeoff_label_user")
-  );
+  const [user] = useState("");
 
   const fileInputRef = useRef(null);
 
@@ -304,27 +299,11 @@ export default function LabelApp() {
     finally { setUploading(false); }
   };
 
-  // ── Username gate ──────────────────────────────────────────────────────────
-  if (userPrompt) {
-    return (
-      <div style={s.gate}>
-        <div style={s.gateBox}>
-          <div style={s.gateTitle}>TakeOff Label</div>
-          <div style={s.gateSub}>Enter your name to get started</div>
-          <NameForm onSubmit={(name) => {
-            localStorage.setItem("takeoff_label_user", name);
-            setUser(name); setUserPrompt(false);
-          }} />
-        </div>
-      </div>
-    );
-  }
-
   // ── Projects screen ────────────────────────────────────────────────────────
   if (view === "projects") {
     return (
       <div style={s.screen}>
-        <TopBar title="TakeOff Label" right={<span style={s.userChip}>{user}</span>} />
+        <TopBar title="TakeOff Label" />
         <div style={s.content}>
           <div style={s.card}>
             <div style={s.cardTitle}>Projects</div>
@@ -370,7 +349,6 @@ export default function LabelApp() {
         <TopBar
           title={project.name}
           left={<button style={s.backBtn} onClick={() => { setProject(null); setView("projects"); }}>← Projects</button>}
-          right={<span style={s.userChip}>{user}</span>}
         />
         <div style={s.content}>
           <div style={s.card}>
@@ -716,19 +694,6 @@ function TopBar({ title, left, right }) {
   );
 }
 
-function NameForm({ onSubmit }) {
-  const [val, setVal] = useState("");
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-      <input style={s.input} placeholder="Your name" value={val} autoFocus
-        onChange={(e) => setVal(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && val.trim() && onSubmit(val.trim())} />
-      <button style={{ ...s.btn, opacity: val.trim() ? 1 : 0.5 }}
-        onClick={() => val.trim() && onSubmit(val.trim())}
-        disabled={!val.trim()}>Enter</button>
-    </div>
-  );
-}
 
 const s = {
   root:       { display: "flex", flexDirection: "column", height: "100vh", background: "#0d0d1a", fontFamily: "system-ui, sans-serif", color: "#ccc" },
@@ -749,13 +714,8 @@ const s = {
   deleteBtn:  { background: "none", border: "none", color: "#444", cursor: "pointer", fontSize: 18, lineHeight: 1 },
   empty:      { color: "#333", fontSize: 13, padding: "8px 0" },
   uploadZone: { border: "2px dashed #2a2a4a", borderRadius: 6, padding: "28px 16px", textAlign: "center", color: "#444", cursor: "pointer", fontSize: 13 },
-  gate:       { height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: "#0d0d1a" },
-  gateBox:    { background: "#1a1a2e", border: "1px solid #2a2a4a", borderRadius: 8, padding: "32px 28px", width: 300, display: "flex", flexDirection: "column", gap: 12 },
-  gateTitle:  { fontSize: 20, fontWeight: 700, color: "#fff" },
-  gateSub:    { fontSize: 13, color: "#555", marginBottom: 4 },
   backBtn:    { background: "none", border: "1px solid #333", borderRadius: 4, color: "#888", cursor: "pointer", padding: "4px 10px", fontSize: 12 },
   filename:   { fontWeight: 600, color: "#e8e8e8", fontSize: 13 },
-  userChip:   { fontSize: 12, color: "#555" },
   pageNav:    { display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" },
   navBtn:     { background: "none", border: "1px solid #333", borderRadius: 3, color: "#888", cursor: "pointer", padding: "3px 8px", fontSize: 13 },
   doneBtn:        { background: "none", border: "1px solid #333", borderRadius: 3, color: "#888", cursor: "pointer", padding: "3px 10px", fontSize: 12 },
