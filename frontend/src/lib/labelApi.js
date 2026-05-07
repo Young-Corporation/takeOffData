@@ -104,18 +104,24 @@ export function getPageSvgUrl(sessionId, pageNumber) {
   return `idb://${sessionId}/${pageNumber}`;
 }
 
-// Canvas rendering at 6× scale (432 DPI). PNG avoids JPEG compression blur.
+// Canvas rendering at 3× scale (216 DPI). The earlier 6× setting produced a
+// ~17 megapixel page (~70MB GPU texture) which choked pan/zoom on integrated
+// GPUs; 3× still oversamples by 3:1 at fit-zoom and stays sharp out to ~3× app
+// zoom. Returns a Blob URL instead of a base64 dataURL — Blob URLs let the
+// browser stream-decode the PNG directly to GPU instead of allocating tens of
+// MB of base64 string in JS memory.
 export async function renderPage(sessionId, pageNumber) {
   const pdf      = await _getPdf(sessionId);
   const page     = await pdf.getPage(pageNumber);
-  const viewport = page.getViewport({ scale: 6 });
+  const viewport = page.getViewport({ scale: 3 });
   const canvas   = document.createElement('canvas');
   canvas.width   = Math.round(viewport.width);
   canvas.height  = Math.round(viewport.height);
   await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-  const dataUrl  = canvas.toDataURL('image/png');
+  const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+  const url  = URL.createObjectURL(blob);
   return {
-    html: `<img src="${dataUrl}" width="${canvas.width}" height="${canvas.height}" style="display:block">`,
+    html: `<img src="${url}" width="${canvas.width}" height="${canvas.height}" decoding="async" style="display:block">`,
     w: canvas.width,
     h: canvas.height,
   };

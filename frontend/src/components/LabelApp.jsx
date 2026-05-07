@@ -2,7 +2,7 @@
 // The admin dashboard lives in AdminApp.jsx and is selected by App.jsx based
 // on the ?admin=1 URL flag, so no admin/export UI exists in this file.
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import MarkManager  from "./MarkManager";
 import LabelMode    from "./LabelMode";
 import PresenceBar  from "./PresenceBar";
@@ -18,16 +18,35 @@ import {
   listRegionExclusions, createRegionExclusion, deleteRegionExclusion,
 } from "../lib/labelApi";
 
-const SVG_RENDER_SCALE = 4; // roughly matches the prior 300-DPI canvas overlay
-const SVG_PAGE_CACHE_LIMIT = 16;
+// Bitmap resolution multiplier over the PDF's parametric viewBox. Larger
+// values keep the page sharp at deep zooms but quadratically blow up the
+// composited layer's GPU memory and per-frame compositing cost. 2× = ~150 DPI
+// at native viewBox, more than enough for moderate zoom on a labeling task.
+const SVG_RENDER_SCALE = 2;
+// Smaller cache than before — at 3× pdf.js render scale each page is ~5–15 MB
+// of decoded bitmap, so a generous cache costs real GPU memory.
+const SVG_PAGE_CACHE_LIMIT = 6;
 const svgPageCache = new Map();
 const svgPageRequests = new Map();
 
+// Reclaim any Blob URLs that the locally-rendered (idb://) PNG path created.
+// Without this, navigating across many pages slowly leaks blob memory.
+function freePageEntry(page) {
+  if (!page?.html) return;
+  const m = page.html.match(/src="(blob:[^"]+)"/);
+  if (m) URL.revokeObjectURL(m[1]);
+}
+
 function rememberSvgPage(src, page) {
-  if (svgPageCache.has(src)) svgPageCache.delete(src);
+  if (svgPageCache.has(src)) {
+    freePageEntry(svgPageCache.get(src));
+    svgPageCache.delete(src);
+  }
   svgPageCache.set(src, page);
   while (svgPageCache.size > SVG_PAGE_CACHE_LIMIT) {
-    svgPageCache.delete(svgPageCache.keys().next().value);
+    const oldestKey = svgPageCache.keys().next().value;
+    freePageEntry(svgPageCache.get(oldestKey));
+    svgPageCache.delete(oldestKey);
   }
 }
 
@@ -262,6 +281,14 @@ export default function LabelApp() {
 
   const isPageExcluded = pageExclusions.some((e) => e.page_number === currentPage);
 
+  // Stable identity for the per-page slice — without useMemo, .filter() returns
+  // a new array on every render, which would force the label canvas to redraw
+  // each time the parent rerenders (e.g. during a wheel-zoom rAF tick).
+  const pageRegionExclusions = useMemo(
+    () => regionExclusions.filter((r) => r.page_number === currentPage),
+    [regionExclusions, currentPage],
+  );
+
   const toggleSkipCurrentPage = async () => {
     if (!session) return;
     try {
@@ -490,7 +517,7 @@ export default function LabelApp() {
               annotations={annotations}
               marks={marks}
               activeMark={activeMark}
-              regionExclusions={regionExclusions.filter((r) => r.page_number === currentPage)}
+              regionExclusions={pageRegionExclusions}
               excludeMode={excludeMode}
               onAnnotationCreate={handleAnnotationCreate}
               onAnnotationDelete={handleAnnotationDelete}
@@ -513,13 +540,12 @@ export default function LabelApp() {
   );
 }
 
-// ── ZoomPanViewer — renders SVG page + label canvas inside a zoom/pan stage ──
+// ── ZoomPanViewer — renders page bitmap + label canvas inside a zoom/pan stage ──
 //
-// Page is fetched as SVG markup and injected as live SVG nodes (not <img>),
-// so the browser re-rasterizes the parametric paths at the effective scale
-// every paint — no DPI ceiling, no resampling, no zoom blur. The label canvas
-// matches the SVG's nominal pixel dimensions so the two stay aligned, and the
-// wrapper applies a CSS transform for zoom + pan:
+// The page is rendered to PNG by pdf.js (see lib/labelApi.renderPage) and
+// injected as an <img>. The wrapper applies a CSS transform for zoom + pan,
+// driven imperatively via stageRef so the gesture path doesn't churn React
+// state — with `will-change: transform` for GPU compositing.
 //   • scroll wheel → zoom around cursor
 //   • middle-click drag → pan
 //   • auto-fits to container on first load and on page change
@@ -529,12 +555,38 @@ function ZoomPanViewer({ svgSrc, annotations, marks, activeMark,
   onExclusionCreate,  onExclusionDelete }) {
   const [dims,    setDims]    = useState({ w: 0, h: 0 });
   const [svgHtml, setSvgHtml] = useState("");
-  const [zoom, setZoom] = useState(1);
-  const [pan,  setPan]  = useState({ x: 0, y: 0 });
   const containerRef    = useRef(null);
+  const stageRef        = useRef(null);
+  // Authoritative zoom/pan lives in a ref so wheel/pan handlers can update
+  // the DOM transform every frame WITHOUT triggering a React render. Without
+  // this, every mousemove/wheel tick rerendered the entire viewer + label
+  // canvas (which redraws every annotation), making the interaction stutter.
   const stateRef        = useRef({ zoom: 1, pan: { x: 0, y: 0 } });
   const [isPanning, setIsPanning] = useState(false);
-  stateRef.current = { zoom, pan };
+  // displayZoom is a low-frequency mirror of stateRef.zoom used only for the
+  // bottom-right "100%" readout; updated via rAF so it doesn't fire per event.
+  const [displayZoom, setDisplayZoom] = useState(1);
+  const displayRafRef = useRef(0);
+
+  // Push the current stateRef values into the DOM. Cheap — just a style write.
+  const applyTransform = useCallback(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const { zoom, pan } = stateRef.current;
+    el.style.transform = `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`;
+  }, []);
+
+  const scheduleDisplayUpdate = useCallback(() => {
+    if (displayRafRef.current) return;
+    displayRafRef.current = requestAnimationFrame(() => {
+      displayRafRef.current = 0;
+      setDisplayZoom(stateRef.current.zoom);
+    });
+  }, []);
+
+  useEffect(() => () => {
+    if (displayRafRef.current) cancelAnimationFrame(displayRafRef.current);
+  }, []);
 
   // Fetch the page SVG, parse its viewBox to learn the page's parametric size,
   // and force concrete unitless width/height attributes so it lays out at
@@ -555,21 +607,26 @@ function ZoomPanViewer({ svgSrc, annotations, marks, activeMark,
     return () => { cancelled = true; };
   }, [svgSrc]);
 
-  // Fit-to-container once image dims are known
+  // Fit-to-container once image dims are known. Update stateRef and apply the
+  // transform synchronously so there's no flash at 1x before the fit lands.
   useEffect(() => {
     if (!dims.w || !containerRef.current) return;
     const el = containerRef.current;
     const cw = el.clientWidth, ch = el.clientHeight;
     if (!cw || !ch) return;
     const fit = Math.min(cw / dims.w, ch / dims.h, 1);
-    setZoom(fit);
-    setPan({ x: (cw - dims.w * fit) / 2, y: (ch - dims.h * fit) / 2 });
-  }, [dims.w, dims.h]);
+    stateRef.current = {
+      zoom: fit,
+      pan:  { x: (cw - dims.w * fit) / 2, y: (ch - dims.h * fit) / 2 },
+    };
+    applyTransform();
+    setDisplayZoom(fit);
+  }, [dims.w, dims.h, applyTransform]);
 
   // Wheel zoom — attached non-passively so we can preventDefault.
   // Proportional to deltaY for smooth feel on both mouse wheel and trackpad.
-  // stateRef is updated synchronously here so rapid back-to-back wheel events
-  // compound correctly instead of reading stale render state.
+  // We update stateRef + the DOM transform directly; React state for the %
+  // readout is rAF-coalesced so a flurry of wheel events doesn't render-storm.
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -591,16 +648,18 @@ function ZoomPanViewer({ svgSrc, annotations, marks, activeMark,
         y: my - ((my - p.y) / z) * nz,
       };
       stateRef.current = { zoom: nz, pan: np };
-      setZoom(nz);
-      setPan(np);
+      applyTransform();
+      scheduleDisplayUpdate();
     };
     el.addEventListener("wheel", handler, { passive: false });
     return () => el.removeEventListener("wheel", handler);
-  }, [dims.w]); // re-run once container actually mounts (first render returns null)
+  }, [dims.w, applyTransform, scheduleDisplayUpdate]); // re-run once container actually mounts
 
   // Drag-to-pan — middle-click is the universal pan; left-click also pans
   // whenever no mark is selected (no-mark = "review" mode, mark = "draw" mode).
   // Listeners are on window so the drag survives the cursor leaving the area.
+  // The mouse-move handler updates the DOM transform directly without any
+  // React state churn — only mouse-down/up flip the isPanning flag.
   const onMouseDown = (e) => {
     const isMiddle  = e.button === 1;
     // Left-click pans only when nothing else wants the drag — i.e. no mark is
@@ -610,10 +669,15 @@ function ZoomPanViewer({ svgSrc, annotations, marks, activeMark,
     if (!isMiddle && !isLeftPan) return;
     e.preventDefault();
     const triggerBtn = e.button;
-    const start = { mx: e.clientX, my: e.clientY, px: pan.x, py: pan.y };
+    const startPan = stateRef.current.pan;
+    const start = { mx: e.clientX, my: e.clientY, px: startPan.x, py: startPan.y };
     setIsPanning(true);
     const onMove = (ev) => {
-      setPan({ x: start.px + (ev.clientX - start.mx), y: start.py + (ev.clientY - start.my) });
+      stateRef.current = {
+        zoom: stateRef.current.zoom,
+        pan:  { x: start.px + (ev.clientX - start.mx), y: start.py + (ev.clientY - start.my) },
+      };
+      applyTransform();
     };
     const onUp = (ev) => {
       if (ev.button !== triggerBtn) return;
@@ -624,6 +688,10 @@ function ZoomPanViewer({ svgSrc, annotations, marks, activeMark,
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
   };
+
+  // Re-apply transform after every render so unrelated rerenders (e.g. new
+  // annotations from the WS) don't strand the DOM at a stale transform.
+  useEffect(() => { applyTransform(); });
 
   if (!dims.w) return null;
   return (
@@ -639,11 +707,13 @@ function ZoomPanViewer({ svgSrc, annotations, marks, activeMark,
               : "grab",
       }}
     >
-      <div style={{
+      <div ref={stageRef} style={{
         position: "absolute", left: 0, top: 0,
         width: dims.w, height: dims.h,
-        transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
         transformOrigin: "0 0",
+        // Hint the browser to promote this to its own composite layer so
+        // pan/zoom transforms are GPU-accelerated.
+        willChange: "transform",
         background: "#fff",
       }}>
         <div
@@ -677,7 +747,7 @@ function ZoomPanViewer({ svgSrc, annotations, marks, activeMark,
         padding: "4px 10px", borderRadius: 4, fontSize: 11,
         pointerEvents: "none", border: "1px solid #2a2a4a",
       }}>
-        {Math.round(zoom * 100)}% · scroll = zoom · middle-drag = pan
+        {Math.round(displayZoom * 100)}% · scroll = zoom · middle-drag = pan
       </div>
     </div>
   );

@@ -21,7 +21,7 @@
 //   onExclusionCreate      — (rect: {x,y,width,height}) => void
 //   onExclusionDelete      — (exclusionId: string) => void
 
-import { useRef, useEffect, useCallback, useState } from "react";
+import { useRef, useEffect, useCallback, useMemo, useState } from "react";
 
 // Build a closed canvas path for the mark's chosen shape, inscribed in the
 // (x, y, w, h) bbox. Caller invokes fill()/stroke() on the resulting path.
@@ -106,7 +106,12 @@ export default function LabelMode({
   const drawing   = useRef(null); // { startX, startY } while dragging
   const [hoverId, setHoverId] = useState(null); // id of annotation under cursor
 
-  const markMap = Object.fromEntries((marks ?? []).map((m) => [m.id, m]));
+  // Memoize so that re-renders driven purely by parent zoom/pan state don't
+  // create a new object identity and invalidate the redraw useCallback below.
+  const markMap = useMemo(
+    () => Object.fromEntries((marks ?? []).map((m) => [m.id, m])),
+    [marks],
+  );
 
   // ── Drawing helpers ─────────────────────────────────────────────────────────
 
